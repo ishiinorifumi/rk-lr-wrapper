@@ -52,7 +52,10 @@ RadiKool ─再生─▶ ffplay.exe（ラッパー）─┤   -headers "Origin: 
 2. 中のファイル（`ffmpeg.wrapper.exe` / `wrap_n_rename_ffmpeg.bat` / `unwrap.bat`）を、
    **RadiKool の `libs` フォルダ**にコピーします。
    （`libs` は本物の `ffmpeg.exe` / `ffplay.exe` が入っているフォルダです。例: `…\radikool\libs`）
-3. **RadiKool を終了**してから `wrap_n_rename_ffmpeg.bat` を実行します。
+3. **RadiKool を終了**（再生・録音も停止）してから `wrap_n_rename_ffmpeg.bat` を実行します。
+
+> RadiKool・再生(ffplay)・録音(ffmpeg) のいずれかが動いていると、実行ファイルがロックされて
+> 入れ替えできません。その場合 bat は処理を中断してメッセージを表示します（ファイルは壊しません）。
 
 書き込みに失敗する場合は、bat を右クリック →「管理者として実行」してください。
 
@@ -70,7 +73,7 @@ RadiKool ─再生─▶ ffplay.exe（ラッパー）─┤   -headers "Origin: 
 ## 取り外し（元に戻す）
 
 `unwrap.bat` を実行すると、`*.origin.exe` を本物の `ffmpeg.exe` / `ffplay.exe` に戻します
-（RadiKool を終了してから実行）。
+（**RadiKool を終了し、再生・録音も停止してから**実行してください。動作中だと戻せません）。
 
 ## ソースからビルドする場合
 
