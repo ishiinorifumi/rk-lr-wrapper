@@ -1,12 +1,17 @@
-// ffmpeg origin ラッパー
+// LR origin ラッパー（RadiKool 向け・ffmpeg / ffplay 兼用）
 //
-// RadiKool が呼ぶ ffmpeg.exe になりすまし、入力URLが LR
-// (mtist.as.smartstream.ne.jp) のときだけ「-headers "Origin: https://listenradio.jp"」を
-// -i の前に挿入して、本物の ffmpeg（既定: ffmpeg.origin.exe）へ丸投げする。
+// RadiKool が呼ぶ ffmpeg.exe（録音）/ ffplay.exe（再生）になりすまし、
+// 入力URLが LR (mtist.as.smartstream.ne.jp) のときだけ
+// 「-headers "Origin: https://listenradio.jp"」を挿入して、本物の実行ファイルへ丸投げする。
 //
-// それ以外（radiko / NHK など）の引数は一切変更せずに素通しする。
-// 標準入出力と終了コードは完全に透過するので、RadiKool からの録音停止（stdin への 'q'）も
-// そのまま本物の ffmpeg に届く。
+//   ffmpeg.exe  → 本物 ffmpeg.origin.exe を呼ぶ（-i の前に -headers を挿入）
+//   ffplay.exe  → 本物 ffplay.origin.exe を呼ぶ（位置引数URL の前に -headers を挿入）
+//
+// 本物の名前は「自分自身のファイル名 + .origin.exe」で自動決定する。
+// そのため、ビルドした 1 つの exe を ffmpeg.exe / ffplay.exe の両方にコピーするだけで両対応できる。
+//
+// radiko / NHK など対象ホスト以外、または既に -headers が付いている引数は一切変更せず素通しする。
+// 標準入出力と終了コードは完全に透過するので、RadiKool の録音停止（stdin への 'q'）もそのまま届く。
 
 using System;
 using System.Collections.Generic;
@@ -15,11 +20,8 @@ using System.IO;
 using System.Text;
 using System.Threading;
 
-internal static class FfmpegOriginWrapper
+internal static class LrOriginWrapper
 {
-    // 本物の ffmpeg のファイル名（このラッパーと同じフォルダに置く）
-    private const string RealExeName = "ffmpeg.origin.exe";
-
     // Origin 注入の対象となる入力URLのホスト（LR の配信CDN）
     private const string TargetHost = "mtist.as.smartstream.ne.jp";
 
@@ -29,12 +31,26 @@ internal static class FfmpegOriginWrapper
     private static int Main(string[] args)
     {
         string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-        string realPath = Path.Combine(exeDir, RealExeName);
+
+        // 本物の実行ファイル名 = 自分自身の名前 + ".origin.exe"
+        //   ffmpeg.exe → ffmpeg.origin.exe / ffplay.exe → ffplay.origin.exe
+        string selfBase;
+        try
+        {
+            selfBase = Path.GetFileNameWithoutExtension(
+                Process.GetCurrentProcess().MainModule.FileName);
+        }
+        catch
+        {
+            selfBase = "ffmpeg";
+        }
+        string realName = selfBase + ".origin.exe";
+        string realPath = Path.Combine(exeDir, realName);
 
         if (!File.Exists(realPath))
         {
             Console.Error.WriteLine(
-                "[ffmpeg-origin-wrapper] 本物の ffmpeg が見つかりません: " + realPath);
+                "[lr-origin-wrapper] 本物の実行ファイルが見つかりません: " + realPath);
             return 2;
         }
 
@@ -80,9 +96,11 @@ internal static class FfmpegOriginWrapper
     }
 
     // 必要なときだけ Origin ヘッダーを挿入した引数列を返す。
+    //   ffmpeg: 「-i」の前に挿入。  ffplay: 入力URL（位置引数）の前に挿入。
     private static string[] BuildArgs(string[] args)
     {
         int iIndex = -1;
+        int hostIndex = -1;
         bool hasHeaders = false;
         for (int i = 0; i < args.Length; i++)
         {
@@ -94,29 +112,30 @@ internal static class FfmpegOriginWrapper
             {
                 iIndex = i;
             }
+            if (hostIndex < 0 &&
+                args[i].IndexOf(TargetHost, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                hostIndex = i;
+            }
         }
 
-        // -i が無い / 既に -headers 付き / 入力URLが対象ホストでない 場合は素通し
-        if (iIndex < 0 || hasHeaders || iIndex + 1 >= args.Length)
+        // 対象ホストを含まない / 既に -headers 付き なら素通し
+        if (hostIndex < 0 || hasHeaders)
         {
             return args;
         }
 
-        string inputUrl = args[iIndex + 1];
-        if (inputUrl.IndexOf(TargetHost, StringComparison.OrdinalIgnoreCase) < 0)
-        {
-            return args;
-        }
+        // 挿入位置: -i があれば -i の前（ffmpeg）、無ければ入力URLの前（ffplay の位置引数）
+        int insertPos = (iIndex >= 0) ? iIndex : hostIndex;
 
-        // -i の直前に -headers "Origin: ..." を挿入
         var result = new List<string>(args.Length + 2);
-        for (int i = 0; i < iIndex; i++)
+        for (int i = 0; i < insertPos; i++)
         {
             result.Add(args[i]);
         }
         result.Add("-headers");
         result.Add(OriginHeaderValue);
-        for (int i = iIndex; i < args.Length; i++)
+        for (int i = insertPos; i < args.Length; i++)
         {
             result.Add(args[i]);
         }
