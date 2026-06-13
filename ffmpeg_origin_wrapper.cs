@@ -12,11 +12,17 @@
 //
 // radiko / NHK など対象ホスト以外、または既に -headers が付いている引数は一切変更せず素通しする。
 // 標準入出力と終了コードは完全に透過するので、RadiKool の録音停止（stdin への 'q'）もそのまま届く。
+//
+// 【停止の確実化】RadiKool は再生停止時にこのラッパー(ffplay.exe)を強制終了(Kill)するが、
+// その際に子プロセス(本物 ffplay.origin.exe)が孤児として残り再生し続ける問題があるため、
+// 子プロセスを「kill-on-close」のジョブオブジェクトに入れる。これにより、ラッパーが
+// （Kill を含め）どんな理由で終了しても、OS が確実に子プロセスを終了させる。
 
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
@@ -27,6 +33,9 @@ internal static class LrOriginWrapper
 
     // 挿入するヘッダー（末尾 CRLF はヘッダー行の終端）
     private const string OriginHeaderValue = "Origin: https://listenradio.jp\r\n";
+
+    // ジョブオブジェクトのハンドル（プロセス終了まで開いたまま保持する）
+    private static IntPtr _jobHandle = IntPtr.Zero;
 
     private static int Main(string[] args)
     {
@@ -72,6 +81,10 @@ internal static class LrOriginWrapper
         using (var child = new Process { StartInfo = psi })
         {
             child.Start();
+
+            // 親(このラッパー)が終了したら子(本物)も必ず終了させる。
+            // RadiKool が停止ボタンでラッパーを Kill しても、子の再生/録音が残らないようにする。
+            AssignToKillOnCloseJob(child);
 
             // 親(RadiKool) stdin -> 子 stdin（'q' による停止などを透過）
             var stdinThread = new Thread(() => PumpStdin(child)) { IsBackground = true };
@@ -140,6 +153,44 @@ internal static class LrOriginWrapper
             result.Add(args[i]);
         }
         return result.ToArray();
+    }
+
+    // 子プロセスを kill-on-close のジョブに入れる。
+    // このラッパーが終了（Kill 含む）すると OS がジョブを閉じ、子プロセスも終了する。
+    private static void AssignToKillOnCloseJob(Process child)
+    {
+        try
+        {
+            IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
+            if (hJob == IntPtr.Zero)
+            {
+                return;
+            }
+
+            var ext = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            ext.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            int len = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            IntPtr p = Marshal.AllocHGlobal(len);
+            try
+            {
+                Marshal.StructureToPtr(ext, p, false);
+                SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, p, (uint)len);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(p);
+            }
+
+            AssignProcessToJobObject(hJob, child.Handle);
+
+            // hJob は意図的に閉じない。プロセス終了時に OS が閉じ、kill-on-close が発動する。
+            _jobHandle = hJob;
+        }
+        catch
+        {
+            // ジョブが使えない環境でも通常動作は継続する（停止伝播のみ効かない）。
+        }
     }
 
     // 親 stdin を子 stdin へ中継。親側が EOF になったら子 stdin を閉じる。
@@ -237,5 +288,56 @@ internal static class LrOriginWrapper
             }
         }
         sb.Append('"');
+    }
+
+    // ===== ジョブオブジェクト関連の P/Invoke =====
+
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(
+        IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
     }
 }
